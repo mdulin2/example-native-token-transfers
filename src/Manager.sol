@@ -34,6 +34,8 @@ abstract contract Manager is
     using NormalizedAmountLib for uint256;
     using NormalizedAmountLib for NormalizedAmount;
 
+    error RefundFailed(uint256 refundAmount);
+
     address public immutable token;
     Mode public immutable mode;
     uint16 public immutable chainId;
@@ -186,15 +188,19 @@ abstract contract Manager is
         );
     }
 
-    /// @notice Called by the user to send the token cross-chain.
-    ///         This function will either lock or burn the sender's tokens.
-    ///         Finally, this function will call into the Endpoint contracts to send a message with the incrementing sequence number, msgType = 1y, and the token transfer payload.
-    function transfer(
-        uint256 amount,
-        uint16 recipientChain,
-        bytes32 recipient,
-        bool shouldQueue
-    ) external payable nonReentrant returns (uint64 msgSequence) {
+    /// @dev Refunds the remaining amount back to the sender.
+    function refundToSender(uint256 refundAmount) internal {
+        // refund the price quote back to sender
+        (bool refundSuccessful,) = payable(msg.sender).call{value: refundAmount}("");
+
+        // check success
+        if (!refundSuccessful) {
+            revert RefundFailed(refundAmount);
+        }
+    }
+
+    /// @dev Returns normalized amount and checks for dust
+    function normalizeTransferAmount(uint256 amount) internal view returns (NormalizedAmount) {
         NormalizedAmount normalizedAmount;
         {
             // query tokens decimals
@@ -208,6 +214,18 @@ abstract contract Manager is
             }
         }
 
+        return normalizedAmount;
+    }
+
+    /// @notice Called by the user to send the token cross-chain.
+    ///         This function will either lock or burn the sender's tokens.
+    ///         Finally, this function will call into the Endpoint contracts to send a message with the incrementing sequence number, msgType = 1y, and the token transfer payload.
+    function transfer(
+        uint256 amount,
+        uint16 recipientChain,
+        bytes32 recipient,
+        bool shouldQueue
+    ) external payable nonReentrant returns (uint64 msgSequence) {
         if (amount == 0) {
             revert ZeroAmount();
         }
@@ -246,6 +264,9 @@ abstract contract Manager is
             revert InvalidMode(uint8(mode));
         }
 
+        // normalize amount after burning to ensure transfer amount matches (amount - fee)
+        NormalizedAmount normalizedAmount = normalizeTransferAmount(amount);
+
         // get the sequence for this transfer
         uint64 sequence = _useMessageSequence();
 
@@ -264,8 +285,8 @@ abstract contract Manager is
                 // queue up and return
                 _enqueueOutboundTransfer(sequence, normalizedAmount, recipientChain, recipient);
 
-                // refund the price quote back to sender
-                payable(msg.sender).transfer(msg.value);
+                // refund price quote back to sender
+                refundToSender(msg.value);
 
                 // return the sequence in the queue
                 return sequence;
@@ -294,7 +315,7 @@ abstract contract Manager is
             // refund user extra excess value from msg.value
             uint256 excessValue = totalPriceQuote - msg.value;
             if (excessValue > 0) {
-                payable(msg.sender).transfer(excessValue);
+                refundToSender(excessValue);
             }
         }
 

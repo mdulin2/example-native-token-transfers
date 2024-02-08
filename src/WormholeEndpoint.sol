@@ -98,15 +98,11 @@ abstract contract WormholeEndpoint is Endpoint, IWormholeEndpoint, IWormholeRece
         wormholeEndpoint_evmChainId = block.chainid;
     }
 
-    function checkInvalidRelayingConfig(uint16 chainId) public view {
-        bool invalidConfig = isWormholeRelayingEnabled(chainId) && !isWormholeEvmChain(chainId);
-        if (invalidConfig) {
-            revert InvalidRelayingConfig(chainId);
-        }
+    function checkInvalidRelayingConfig(uint16 chainId) internal view returns (bool) {
+        return isWormholeRelayingEnabled(chainId) && !isWormholeEvmChain(chainId);
     }
 
-    function shouldRelayViaStandardRelaying(uint16 chainId) public view returns (bool) {
-        checkInvalidRelayingConfig(chainId);
+    function shouldRelayViaStandardRelaying(uint16 chainId) internal view returns (bool) {
         return isWormholeRelayingEnabled(chainId) && isWormholeEvmChain(chainId);
     }
 
@@ -116,6 +112,10 @@ abstract contract WormholeEndpoint is Endpoint, IWormholeEndpoint, IWormholeRece
         override
         returns (uint256 nativePriceQuote)
     {
+        if (checkInvalidRelayingConfig(targetChain)) {
+            revert InvalidRelayingConfig(targetChain);
+        }
+
         if (shouldRelayViaStandardRelaying(targetChain)) {
             (uint256 cost,) = wormholeRelayer.quoteEVMDeliveryPrice(targetChain, 0, GAS_LIMIT);
             return cost;
@@ -185,6 +185,26 @@ abstract contract WormholeEndpoint is Endpoint, IWormholeEndpoint, IWormholeRece
         (managerPayloadLength, offset) = encoded.asUint16Unchecked(offset);
         (endpointMessage.managerPayload, offset) =
             encoded.sliceUnchecked(offset, managerPayloadLength);
+
+        // Check if the entire byte array has been processed
+        encoded.checkLength(offset);
+    }
+
+    /// @dev Parses the payload of an Endpoint message and returns the parsed ManagerMessage struct.
+    function parsePayload(bytes memory payload)
+        internal
+        pure
+        returns (EndpointStructs.ManagerMessage memory)
+    {
+        // parse the encoded message payload from the Endpoint
+        EndpointStructs.EndpointMessage memory parsedEndpointMessage =
+            _parseEndpointMessage(payload);
+
+        // parse the encoded message payload from the Manager
+        EndpointStructs.ManagerMessage memory parsed =
+            EndpointStructs.parseManagerMessage(parsedEndpointMessage.managerPayload);
+
+        return parsed;
     }
 
     function receiveWormholeMessages(
@@ -214,7 +234,9 @@ abstract contract WormholeEndpoint is Endpoint, IWormholeEndpoint, IWormholeRece
         // emit `ReceivedRelayedMessage` event
         emit ReceivedRelayedMessage(deliveryHash, sourceChain, sourceAddress);
 
-        EndpointStructs.ManagerMessage memory parsed = EndpointStructs.parseManagerMessage(payload);
+        // parse the encoded Endpoint payload
+        EndpointStructs.ManagerMessage memory parsed = parsePayload(payload);
+
         _deliverToManager(parsed);
     }
 
@@ -222,14 +244,11 @@ abstract contract WormholeEndpoint is Endpoint, IWormholeEndpoint, IWormholeRece
     ///         This function should verify the encodedVm and then deliver the attestation to the endpoint manager contract.
     function receiveMessage(bytes memory encodedMessage) external {
         bytes memory payload = _verifyMessage(encodedMessage);
-        // parse the encoded message payload from the Endpoint
-        EndpointStructs.EndpointMessage memory parsedEndpointMessage =
-            _parseEndpointMessage(payload);
-        // parse the encoded message payload from the Manager
-        EndpointStructs.ManagerMessage memory parsedManagerMessage =
-            EndpointStructs.parseManagerMessage(parsedEndpointMessage.managerPayload);
 
-        _deliverToManager(parsedManagerMessage);
+        // parse the encoded Endpoint payload
+        EndpointStructs.ManagerMessage memory parsed = parsePayload(payload);
+
+        _deliverToManager(parsed);
     }
 
     function _verifyMessage(bytes memory encodedMessage) internal returns (bytes memory) {
