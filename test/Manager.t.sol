@@ -125,6 +125,17 @@ contract DummyToken is ERC20 {
     function mintDummy(address to, uint256 amount) public {
         _mint(to, amount);
     }
+
+    function mint(address to, uint256 amount) public{
+        // TODO - add a caller restriction
+        _mint(to, amount);
+    }
+
+    function burnFrom(address to, uint256 amount) public{
+        // TODO - add a caller restriction
+        _spendAllowance(to, _msgSender(), amount);
+        _burn(to, amount);
+    }
 }
 
 // TODO: set this up so the common functionality tests can be run against both
