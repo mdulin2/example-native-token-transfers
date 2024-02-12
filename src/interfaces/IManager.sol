@@ -6,10 +6,10 @@ import "../libraries/NormalizedAmount.sol";
 interface IManager {
     error DeliveryPaymentTooLow(uint256 requiredPayment, uint256 providedPayment);
     error TransferAmountHasDust(uint256 amount, uint256 dust);
-    error MessageAlreadyExecuted(bytes32 msgHash);
     error MessageNotApproved(bytes32 msgHash);
     error InvalidTargetChain(uint16 targetChain, uint16 thisChain);
     error ZeroAmount();
+    error BurnAmountDifferentThanBalanceDiff(uint256 burnAmount, uint256 balanceDiff);
     error InvalidMode(uint8 mode);
     error InvalidSibling(uint16 chainId, bytes32 siblingAddress);
     error InvalidSiblingChainIdZero();

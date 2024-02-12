@@ -184,7 +184,8 @@ abstract contract Manager is
             messageSequence,
             queuedTransfer.amount,
             queuedTransfer.recipientChain,
-            queuedTransfer.recipient
+            queuedTransfer.recipient,
+            queuedTransfer.sender
         );
     }
 
@@ -230,38 +231,53 @@ abstract contract Manager is
             revert ZeroAmount();
         }
 
-        // Lock/burn tokens before checking rate limits
-        if (mode == Mode.LOCKING) {
-            {
-                // use transferFrom to pull tokens from the user and lock them
-                // query own token balance before transfer
-                uint256 balanceBefore = getTokenBalanceOf(token, address(this));
+        {
+            // Lock/burn tokens before checking rate limits
+            if (mode == Mode.LOCKING) {
+                {
+                    // use transferFrom to pull tokens from the user and lock them
+                    // query own token balance before transfer
+                    uint256 balanceBefore = getTokenBalanceOf(token, address(this));
 
-                // transfer tokens
-                IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+                    // transfer tokens
+                    IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
 
-                // query own token balance after transfer
-                uint256 balanceAfter = getTokenBalanceOf(token, address(this));
+                    // query own token balance after transfer
+                    uint256 balanceAfter = getTokenBalanceOf(token, address(this));
 
-                // correct amount for potential transfer fees
-                amount = balanceAfter - balanceBefore;
+                    // correct amount for potential transfer fees
+                    amount = balanceAfter - balanceBefore;
+                }
+            } else if (mode == Mode.BURNING) {
+                {
+                    // query sender's token balance before burn
+                    uint256 balanceBefore = getTokenBalanceOf(token, msg.sender);
+
+                    // call the token's burn function to burn the sender's token
+                    // NOTE: We don't account for burn fees in this code path.
+                    // We verify that the user's change in balance is equal to the amount that's burned.
+                    // Accounting for burn fees can be non-trivial, since there
+                    // is no standard way to account for the fee if the fee amount
+                    // is taken out of the burn amount.
+                    // For example, if there's a fee of 1 which is taken out of the
+                    // amount, then burning 20 tokens would result in a transfer of only 19 tokens.
+                    // However, the difference in the user's balance would only show 20.
+                    // Since there is no standard way to query for burn fee amounts with burnable tokens,
+                    // and NTT would be used on a per-token basis, implementing this functionality
+                    // is left to integrating projects who may need to account for burn fees on their tokens.
+                    ERC20Burnable(token).burnFrom(msg.sender, amount);
+
+                    // query sender's token balance after transfer
+                    uint256 balanceAfter = getTokenBalanceOf(token, msg.sender);
+
+                    uint256 balanceDiff = balanceBefore - balanceAfter;
+                    if (balanceDiff != amount) {
+                        revert BurnAmountDifferentThanBalanceDiff(amount, balanceDiff);
+                    }
+                }
+            } else {
+                revert InvalidMode(uint8(mode));
             }
-        } else if (mode == Mode.BURNING) {
-            {
-                // query sender's token balance before transfer
-                uint256 balanceBefore = getTokenBalanceOf(token, msg.sender);
-
-                // call the token's burn function to burn the sender's token
-                ERC20Burnable(token).burnFrom(msg.sender, amount);
-
-                // query sender's token balance after transfer
-                uint256 balanceAfter = getTokenBalanceOf(token, msg.sender);
-
-                // correct amount for potential burn fees
-                amount = balanceAfter - balanceBefore;
-            }
-        } else {
-            revert InvalidMode(uint8(mode));
         }
 
         // normalize amount after burning to ensure transfer amount matches (amount - fee)
@@ -283,7 +299,9 @@ abstract contract Manager is
                 );
 
                 // queue up and return
-                _enqueueOutboundTransfer(sequence, normalizedAmount, recipientChain, recipient);
+                _enqueueOutboundTransfer(
+                    sequence, normalizedAmount, recipientChain, recipient, msg.sender
+                );
 
                 // refund price quote back to sender
                 refundToSender(msg.value);
@@ -296,14 +314,15 @@ abstract contract Manager is
         // otherwise, consume the outbound amount
         _consumeOutboundAmount(normalizedAmount);
 
-        return _transfer(sequence, normalizedAmount, recipientChain, recipient);
+        return _transfer(sequence, normalizedAmount, recipientChain, recipient, msg.sender);
     }
 
     function _transfer(
         uint64 sequence,
         NormalizedAmount amount,
         uint16 recipientChain,
-        bytes32 recipient
+        bytes32 recipient,
+        address sender
     ) internal returns (uint64 msgSequence) {
         {
             // check up front that msg.value will cover the delivery price
@@ -331,7 +350,7 @@ abstract contract Manager is
                 chainId,
                 sequence,
                 toWormholeFormat(address(this)),
-                toWormholeFormat(msg.sender),
+                toWormholeFormat(sender),
                 encodedTransferPayload
             )
         );
@@ -346,15 +365,17 @@ abstract contract Manager is
     }
 
     // @dev Mark a message as executed.
-    // This function will revert if the message has already been executed.
-    function _replayProtect(bytes32 digest) internal {
+    // This function will retuns `true` if the message has already been executed.
+    function _replayProtect(bytes32 digest) internal returns (bool) {
         // check if this message has already been executed
         if (isMessageExecuted(digest)) {
-            revert MessageAlreadyExecuted(digest);
+            return true;
         }
 
         // mark this message as executed
         _getMessageAttestationsStorage()[digest].executed = true;
+
+        return false;
     }
 
     /// @dev Called after a message has been sufficiently verified to execute the command in the message.
@@ -375,7 +396,14 @@ abstract contract Manager is
             revert MessageNotApproved(digest);
         }
 
-        _replayProtect(digest);
+        bool msgAlreadyExecuted = _replayProtect(digest);
+        if (msgAlreadyExecuted) {
+            // end execution early to mitigate the possibility of race conditions from endpoints
+            // attempting to deliver the same message when (threshold < number of endpoint messages)
+            // notify client (off-chain process) so they don't attempt redundant msg delivery
+            emit MessageAlreadyExecuted(message.sourceManager, digest);
+            return;
+        }
 
         EndpointStructs.NativeTokenTransfer memory nativeTokenTransfer =
             EndpointStructs.parseNativeTokenTransfer(message.payload);
