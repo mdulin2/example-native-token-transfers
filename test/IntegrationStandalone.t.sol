@@ -20,6 +20,7 @@ import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "wormhole-solidity-sdk/interfaces/IWormhole.sol";
 import "wormhole-solidity-sdk/testing/helpers/WormholeSimulator.sol";
 import "wormhole-solidity-sdk/Utils.sol";
+//import "wormhole-solidity-sdk/testing/WormholeRelayerTest.sol";
 
 
 contract TestEndToEnd is Test, IManagerEvents, IRateLimiterEvents {
@@ -621,5 +622,8 @@ contract TestEndToEnd is Test, IManagerEvents, IRateLimiterEvents {
         }
         return copy;
     }
+}
+
+contract TestReplayerEndToEnd is Test, IManagerEvents, IRateLimiterEvents {
 
 }
